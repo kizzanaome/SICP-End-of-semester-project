@@ -1,0 +1,197 @@
+;Kizza Naume Nabanjala
+;MCN 7105 End of semester project
+;Student No: 2400721931
+;Registration No: 2024/HD05/21931U
+
+#lang racket
+
+(require data-science-master)
+(require plot)
+(require srfi/19)
+
+;;; Using the read-csv function to import tweet data
+(define (read-tweets-from-csv file-path)
+  (define csv-data (read-csv file-path #:->number? #f #:header? #t))
+  (map (λ (row)
+         (list (first row)    ;;; Tweet Text
+               (second row)   ;;; Location
+               (third row)))  ;;; Date
+       (cdr csv-data)))       ;;; Skip the header
+
+;;; Import tweets from the CSV file
+(define tweets (read-tweets-from-csv "tweets.csv"))
+
+;;; Convert the tweets date format to Racket date objects
+(define (convert-date-format str)
+  (string->date str "~Y-~m-~d"))
+
+;;; Grouping the tweets by month created
+(define (group-tweets-by-month tweets)
+  (let ([grouped (make-hash)])
+    (for-each
+     (λ (tweet)
+       ;; Safely process each tweet, ensuring it has enough data
+       (if (>= (length tweet) 3)
+           (let* ([date-string (list-ref tweet 2)]
+                  [date (convert-date-format date-string)]
+                  [month (date->string date "~Y-~m")]
+                  [existing (hash-ref grouped month '())])
+             ;; Add the current tweet to the list for the corresponding month
+             (hash-set! grouped month (cons tweet existing)))
+           ;; Log an error or ignore malformed tweets
+           (display "Warning: Malformed tweet encountered\n")))
+     tweets)
+    grouped)) ; Return the hash table containing grouped tweets
+
+;;; Combine all tweet texts into a single document
+(define (combine-tweet-texts tweets)
+  (string-join (map (λ (tweet) (list-ref tweet 0)) tweets) " "))
+
+;;; Remove stop words from tokens
+(define (remove-stop-words tokens)
+  (define stop-words '("the" "and" "to" "a" "in" "of" "is" "on" "this"))
+  (filter (λ (token) (not (member token stop-words))) tokens))
+
+;;; Tokenize combined text, filter tokens,
+;;; and calculate word frequencies
+(define (tokenize-and-count-with-doc tweets)
+  (let ([tokens (document->tokens (combine-tweet-texts tweets) #:sort? #t)])
+    (remove-stop-words tokens)))
+
+;;; Analyze sentiment scores from tokenized input
+(define (perform-sentiment-analysis tokenized-data)
+  (define (valid-entry? entry)
+    (and (list? entry)             ; Ensure it's a list
+         (= (length entry) 3)      ; Verify it has exactly 3 elements
+         (number? (caddr entry)))) ; Check if the third element is numeric
+
+  (let ([sentiment-results (list->sentiment tokenized-data #:lexicon 'nrc)])
+    (filter valid-entry? sentiment-results)))
+
+;;; Aggregate sentiment frequencies by category
+(define (aggregate-sentiments-by-category sentiment-data)
+  (let ([result-hash (make-hash)]) ; Initialize an empty hash table
+    (for-each
+     (λ (entry)
+       (when (>= (length entry) 3) ; Ensure the entry has at least 3 elements
+         (let* ([category (cadr entry)]
+                [raw-freq (caddr entry)]
+                [frequency (if (number? raw-freq)
+                               raw-freq
+                               (string->number raw-freq))] ; Convert string to number if needed
+                [current-total (hash-ref result-hash category 0)]) ; Get existing total or default to 0
+           (hash-set! result-hash category (+ current-total frequency)))))
+     sentiment-data)
+    result-hash)) ; Return the aggregated hash table
+
+;;; Extract top positive and negative words
+(define (top-words-by-sentiment sentiments tokens count)
+  (define positive-words
+    (filter (λ (token) (member (list-ref token 1) '("positive" "joy"))) sentiments))
+  (define negative-words
+    (filter (λ (token) (member (list-ref token 1) '("negative" "sadness" "fear"))) sentiments))
+  (values (take positive-words count) (take negative-words count)))
+
+;;; Group, tokenize, count, and analyze
+(define grouped-tweets (group-tweets-by-month tweets))
+(define sentiments-by-month
+  (for/hash ([month (hash-keys grouped-tweets)])
+    (values month 
+            (aggregate-sentiments-by-category
+             (perform-sentiment-analysis
+              (tokenize-and-count-with-doc (hash-ref grouped-tweets month)))))))
+
+;;; Display Sentiments in Properly Aligned Tabular Format
+(define (display-tabular-sentiments sentiments-by-month)
+  (define sentiment-types '("positive" "trust" "fear" "negative" "joy" 
+                            "anticipation" "anger" "sadness" "surprise" "disgust"))
+  (define column-width 12)
+
+  ;;; Helper to print rows with alignment
+  (define (print-row row) 
+    (for-each (λ (v) (printf (string-append "~a" (make-string (- column-width (string-length v)) #\space)) v)) row) 
+    (newline))
+
+  ;;; Print header and table body
+  (define separator (make-string (* column-width (+ 1 (length sentiment-types))) #\-))
+  (displayln separator)
+  (print-row (cons "Month" sentiment-types))
+  (displayln separator)
+  (for-each 
+   (λ (month) 
+     (print-row (cons month 
+                     (map (λ (type) (number->string (hash-ref (hash-ref sentiments-by-month month '()) type 0))) 
+                          sentiment-types))))
+   (sort (hash-keys sentiments-by-month) string<?))
+  (displayln separator))
+
+;;; Display the tabular sentiment analysis
+(display-tabular-sentiments sentiments-by-month)
+
+;;; Define a list of colors for months
+(define month-colors
+  '("CornflowerBlue" "DarkRed" "ForestGreen" "Goldenrod" "DarkOrange"
+    "SlateBlue" "MediumPurple" "Tomato" "SeaGreen" "MediumOrchid"
+    "RoyalBlue" "MediumVioletRed"))
+
+;;; Add sentiment trends and empty month handling with filtering by month
+;;; and plot a chart representation of the sentiments
+(define (visualize-sentiments sentiments-by-month [selected-month #f])
+  (define all-sentiments '("positive" "trust" "fear" "negative" "joy" "anticipation" "anger" "sadness" "surprise" "disgust"))
+  ;;; Helper function to get filtered sentiments
+  (define (filter-sentiments-by-month month)
+    (hash-ref sentiments-by-month month '()))  ;; Return sentiments for the selected month or empty list
+
+  ;;; Prepare the data for plotting
+  (define filtered-sentiments
+    (if selected-month
+        (filter-sentiments-by-month selected-month)  ;; Filter for specific month
+        sentiments-by-month))                        ;; Default: all months
+
+  ;;; Plot function
+  (parameterize ([plot-width 800]
+                 [plot-x-label "Sentiment"]
+                 [plot-y-label "Frequency"]
+                 [plot-title (if selected-month
+                                (string-append "Sentiment Analysis for " selected-month)
+                                "Monthly Sentiment Analysis")])
+    (plot
+     (list
+      (tick-grid)
+      (if selected-month
+          ;;; Plot for a single month
+          (let ([data (hash->list filtered-sentiments)])  ;; Convert hash to list
+            (discrete-histogram
+             (map (λ (pair) (list (car pair) (cdr pair))) data)
+             #:color "CornflowerBlue"
+             #:line-color "DarkBlue"
+             #:gap 0.2
+             #:label selected-month))
+          
+          ;;; Plot for all months if no filtering
+          (for/list ([month (sort (hash-keys filtered-sentiments) string<?)]
+                     [color (in-naturals 0)])
+            (let* ([month-sentiments (hash-ref filtered-sentiments month '())]
+                   ;;; Ensure all sentiments are represented with default value 0 for missing ones
+                   [formatted-data
+                    (map (λ (sentiment)
+                           (list sentiment (hash-ref month-sentiments sentiment 0)))
+                         all-sentiments)]
+                   ;;; Assign a color for the current month
+                   [month-color (list-ref month-colors (modulo color (length month-colors)))])
+              (discrete-histogram
+               formatted-data
+               #:color month-color
+               #:line-color "DarkBlue"
+               #:gap 0.2
+               #:label (string-append "Month: " month)))))))))
+
+;;; Function to call plotting with a filter
+(define (plot-sentiments-for-month sentiments-by-month month)
+  (visualize-sentiments sentiments-by-month month))
+
+;;; Plot all months
+(visualize-sentiments sentiments-by-month)
+
+;;; Plot a specific month
+(plot-sentiments-for-month sentiments-by-month "2024-08")
